@@ -3,91 +3,110 @@
 # === KONFIGURASI ===
 USERNAME="vitacimin"
 PASSWORD="akuganteng"
-BASE_PORT=3128
+PASSWD_FILE="/etc/squid/passwd"
+BASE_PORT=3000
 
-# === Telegram Bot Info ===
+# === TELEGRAM CONFIG ===
 BOT_TOKEN="7735280430:AAEtpd0qVq2eOzeDqGGesrtxC5XcKlpF-eM"
 CHAT_ID="541900896"
 
-WORKDIR="squid-proxy"
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
+# === AMBIL SEMUA IP PUBLIK DARI INTERFACE YANG AKTIF ===
+IPS=()
+while IFS= read -r ip; do
+    if [[ ! $ip =~ ^127\. && ! $ip =~ ^10\. && ! $ip =~ ^192\.168\. && ! $ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+        IPS+=("$ip")
+    fi
+done < <(ip -4 -o addr show up | awk '{print $4}' | cut -d/ -f1 | sort -u)
 
-# === 1. Ambil Semua IP Publik (kecuali localhost) ===
-IP_LIST=($(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -Ev "^(127\.|10\.|172\.|192\.)"))
-if [ ${#IP_LIST[@]} -eq 0 ]; then
-  echo "❌ Tidak ditemukan IP publik."
-  exit 1
+if (( ${#IPS[@]} == 0 )); then
+    echo "❌ Tidak ditemukan IP publik."
+    exit 1
 fi
 
-# === 2. Buat Dockerfile ===
-cat > Dockerfile <<EOF
-FROM ubuntu:22.04
+# === INSTALL DEPENDENSI ===
+apt update -y
+apt install -y squid apache2-utils curl
 
-RUN apt update && apt install -y squid apache2-utils && rm -rf /var/lib/apt/lists/*
+# === BUAT USER AUTH ===
+htpasswd -cb $PASSWD_FILE $USERNAME "$PASSWORD"
+chmod 640 $PASSWD_FILE
+chown proxy:proxy $PASSWD_FILE
 
-COPY squid.conf /etc/squid/squid.conf
-COPY passwd /etc/squid/passwd
+# === BUAT KONFIGURASI SQUID ===
+cp /etc/squid/squid.conf /etc/squid/squid.conf.bak.$(date +%F-%T)
 
-CMD ["squid", "-N", "-d", "1"]
-EOF
-
-# === 3. Generate squid.conf ===
-> squid.conf  # kosongkan dulu
-PORT=$BASE_PORT
-
-for IP in "${IP_LIST[@]}"; do
-  echo "http_port $IP:$PORT" >> squid.conf
-  PORT=$((PORT + 1))
-done
-
-cat >> squid.conf <<EOF
-
-auth_param basic program /usr/lib/squid/basic_ncsa_auth /etc/squid/passwd
-auth_param basic realm ProxyAuth
+cat > /etc/squid/squid.conf <<EOF
+auth_param basic program /usr/lib/squid/basic_ncsa_auth $PASSWD_FILE
+auth_param basic realm Proxy
 acl authenticated proxy_auth REQUIRED
 http_access allow authenticated
 http_access deny all
-
 access_log /var/log/squid/access.log
+cache_log /var/log/squid/cache.log
+logfile_rotate 10
+buffered_logs on
+dns_v4_first on
+visible_hostname proxy.local
 EOF
 
-# === 4. Buat file passwd (hash password) ===
-HASH=$(openssl passwd -apr1 "$PASSWORD")
-echo "$USERNAME:$HASH" > passwd
-
-# === 5. Build Docker ===
-docker build -t squid-proxy .
-
-# === 6. Run Docker dengan Semua Port Terbuka ===
-docker rm -f squid-proxy-instance >/dev/null 2>&1
-
-# Buat string -p port1:port1 -p port2:port2 dst
+PORT_LIST=()
 PORT=$BASE_PORT
-PORT_ARGS=""
-for IP in "${IP_LIST[@]}"; do
-  PORT_ARGS="$PORT_ARGS -p $PORT:$PORT"
-  PORT=$((PORT + 1))
+
+for ip in "${IPS[@]}"; do
+    echo "http_port $PORT" >> /etc/squid/squid.conf
+    echo "acl toport$PORT myport $PORT" >> /etc/squid/squid.conf
+    echo "tcp_outgoing_address $ip toport$PORT" >> /etc/squid/squid.conf
+    echo "" >> /etc/squid/squid.conf
+    PORT_LIST+=("$ip:$PORT")
+    ((PORT++))
 done
 
-eval docker run -d --name squid-proxy-instance $PORT_ARGS squid-proxy
+# === RESTART SQUID ===
+systemctl restart squid
+if systemctl is-active --quiet squid; then
+    echo "✅ Squid berhasil dijalankan."
+else
+    echo "❌ Squid gagal dijalankan. Periksa dengan: journalctl -xe"
+fi
 
-# === 7. Kirim semua proxy link ke Telegram ===
-PORT=$BASE_PORT
-PROXY_MESSAGE="✅ *Proxy HTTP Siap Dipakai:*\n\`\`\`"
-for IP in "${IP_LIST[@]}"; do
-  LINK="http://$USERNAME:$PASSWORD@$IP:$PORT"
-  PROXY_MESSAGE+=$'\n'"$LINK"
-  PORT=$((PORT + 1))
+# === OUTPUT FILE ===
+PUBLIC_IP_MAIN=$(curl -s ifconfig.me)
+FILENAME="proxies-$PUBLIC_IP_MAIN.txt"
+> "$FILENAME"
+PROXY_LINKS=""
+
+for entry in "${PORT_LIST[@]}"; do
+    ip="${entry%%:*}"
+    port="${entry##*:}"
+    echo "http://$USERNAME:$PASSWORD@$ip:$port" >> "$FILENAME"
+    PROXY_LINKS+="http://$USERNAME:$PASSWORD@$ip:$port"$'\n'
 done
-PROXY_MESSAGE+="\n\`\`\`"
 
-# Escape untuk MarkdownV2 Telegram
-ESCAPED_MSG=$(echo "$PROXY_MESSAGE" | sed -e 's/\./\\./g' -e 's/\-/\\-/g' -e 's/\//\\\//g' -e 's/@/\\@/g' -e 's/:/\\:/g')
+echo "✅ File $FILENAME selesai dibuat dengan total ${#PORT_LIST[@]} proxy"
+
+# === AUTO RESTART CRON SETIAP 12 JAM ===
+CRON_FILE="/etc/cron.d/squid-autorestart"
+cat > "$CRON_FILE" <<EOF
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+0 */12 * * * root systemctl restart squid
+EOF
+chmod 644 "$CRON_FILE"
+echo "🕒 Cron dibuat di $CRON_FILE untuk auto restart tiap 12 jam"
+
+# === ESCAPE DAN KIRIM KE TELEGRAM DENGAN MARKDOWN V2 ===
+ESCAPED_LINKS=$(cat "$FILENAME" | sed 's/\./\\./g; s/\-/\\-/g; s/\//\\\//g; s/@/\\@/g; s/:/\\:/g')
+MESSAGE=$(cat <<EOF
+✅ Proxy HTTP Siap Dipakai:
+\`\`\`
+$ESCAPED_LINKS
+\`\`\`
+EOF
+)
 
 curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
      -d "chat_id=$CHAT_ID" \
-     -d "text=$ESCAPED_MSG" \
-     -d "parse_mode=MarkdownV2" &&
-  echo "✅ Proxy berhasil dikirim ke Telegram" ||
-  echo "❌ Gagal mengirim proxy ke Telegram"
+     -d "text=$MESSAGE" \
+     -d "parse_mode=MarkdownV2" \
+     && echo "✅ Proxy berhasil dikirim ke Telegram" \
+     || echo "❌ Gagal mengirim ke Telegram"
