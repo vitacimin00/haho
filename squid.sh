@@ -54,20 +54,14 @@ SERVER_IP=$(curl -4 -s https://ifconfig.me || curl -4 -s https://ipinfo.io/ip)
 
 # === 6. Format link dan escape untuk Telegram MarkdownV2 ===
 PROXY_LINK="http://$USERNAME:$PASSWORD@$SERVER_IP:$PORT"
-ESCAPED_LINK=$(printf "%s" "$PROXY_LINK" | sed -e 's/[]\/()~#^*+?.|$&!{}[\]:<>@`_=-]/\\&/g')
+ESCAPED_LINK=$(printf "%s" "$PROXY_LINK" | sed -e 's/[][(){}.!_^~`>#+=|$&*\\\/@:-]/\\&/g')
 
-# === 7. Buat pesan Telegram ===
-MESSAGE="✅ Proxy HTTP Siap Dipakai:
-\\\`
-$ESCAPED_LINK
-\\\`"
-
-# === 8. Kirim ke Telegram ===
+# === 7. Kirim ke Telegram (hanya link saja) ===
 if curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
      -d "chat_id=$CHAT_ID" \
-     -d "text=$MESSAGE" \
+     -d "text=$ESCAPED_LINK" \
      -d "parse_mode=MarkdownV2"; then
-  echo "✅ Proxy berhasil dikirim ke Telegram (via chat)"
+  echo "✅ Proxy berhasil dikirim ke Telegram"
 else
   echo "❌ Gagal mengirim proxy ke Telegram"
 fi
