@@ -41,27 +41,23 @@ http_access deny all
 access_log /var/log/squid/access.log
 EOF
 
-# === 3. Buat file passwd (dengan htpasswd) ===
-htpasswd -b -c passwd "$USERNAME" "$PASSWORD"
+# === 3. Buat file passwd (dengan hash) ===
+HASH=$(openssl passwd -apr1 "$PASSWORD")
+echo "$USERNAME:$HASH" > passwd
 
 # === 4. Build & Run Docker ===
 docker build -t squid-proxy .
 docker rm -f squid-proxy-instance >/dev/null 2>&1
-docker run -d --name squid-proxy-instance -p $PORT:$PORT --restart unless-stopped squid-proxy
+docker run -d --name squid-proxy-instance -p $PORT:$PORT squid-proxy
 
 # === 5. Ambil IP VPS (paksa IPv4) ===
 SERVER_IP=$(curl -4 -s https://ifconfig.me || curl -4 -s https://ipinfo.io/ip)
 
-# === 6. Format link dan escape untuk Telegram MarkdownV2 ===
+# === 6. Format link proxy dan kirim (tanpa Markdown) ===
 PROXY_LINK="http://$USERNAME:$PASSWORD@$SERVER_IP:$PORT"
-ESCAPED_LINK=$(printf "%s" "$PROXY_LINK" | sed -e 's/[][(){}.!_^~`>#+=|$&*\\\/@:-]/\\&/g')
 
-# === 7. Kirim ke Telegram (hanya link saja) ===
-if curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
      -d "chat_id=$CHAT_ID" \
-     -d "text=$ESCAPED_LINK" \
-     -d "parse_mode=MarkdownV2"; then
-  echo "✅ Proxy berhasil dikirim ke Telegram"
-else
-  echo "❌ Gagal mengirim proxy ke Telegram"
-fi
+     -d "text=$PROXY_LINK"
+
+echo "✅ Proxy berhasil dikirim ke Telegram: $PROXY_LINK"
