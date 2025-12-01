@@ -21,9 +21,9 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-USERNAME="${1:-proxyuser}"
-PASSWORD="${2:-proxypass}"
-PORT="${3:-3128}"
+USERNAME="vitacimin"
+PASSWORD="akuganteng123"
+PORT="3128"
 
 echo "===> Install Squid + apache2-utils..."
 apt-get update -y
